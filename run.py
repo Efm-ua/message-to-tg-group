@@ -1,82 +1,80 @@
+# run.py
 import asyncio
 import logging
+import sys
 from app import create_app
-from bot_config import TelegramBot
+from telegram.ext import Application
 from hypercorn.asyncio import serve
 from hypercorn.config import Config as HyperConfig
 from dotenv import load_dotenv
 import os
-import sys
-from asyncio import Event
 
-# Налаштування розширеного логування
+# Load environment variables
+load_dotenv()
+
+# Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('app.log')
+        logging.FileHandler('app.log', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
 
-async def main():
+async def init_bot(app):
+    """Initialize Telegram bot"""
     try:
-        logger.debug("Starting application initialization")
-        
-        # Create and configure the Flask app
-        app = create_app()
-        logger.info("Flask app created successfully")
-        
-        # Initialize the Telegram bot
-        bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        if not bot_token:
-            logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
-            raise ValueError("TELEGRAM_BOT_TOKEN is required")
-            
-        logger.debug("Initializing Telegram bot")
-        bot_handler = TelegramBot(bot_token)
-        app.bot = await bot_handler.initialize()
+        application = Application.builder().token(app.config['TELEGRAM_BOT_TOKEN']).build()
+        app.bot = application.bot
+        await app.bot.initialize()
         logger.info("Telegram bot initialized successfully")
-        
-        # Configure Hypercorn
-        config = HyperConfig()
-        config.bind = ["127.0.0.1:5000"]
-        config.use_reloader = True
-        logger.debug("Hypercorn configured")
-        
-        # Create shutdown event
-        shutdown_event = Event()
-        
-        # Define shutdown handler
-        async def shutdown():
-            logger.debug("Starting shutdown procedure")
-            try:
-                await bot_handler.shutdown()
-                logger.info("Bot shutdown completed")
-            except Exception as e:
-                logger.error(f"Error during bot shutdown: {e}")
-            finally:
-                shutdown_event.set()
-                logger.info("Application shutdown complete")
-        
-        # Create proper shutdown trigger
-        def shutdown_trigger():
-            return shutdown_event.wait()
-        
-        logger.info("Starting server...")
-        await serve(app, config, shutdown_trigger=shutdown_trigger)
-        
+        return app.bot
     except Exception as e:
-        logger.error(f"Application startup failed: {e}", exc_info=True)
+        logger.error(f"Failed to initialize Telegram bot: {e}")
         raise
 
-if __name__ == '__main__':
+async def shutdown_bot(app):
+    """Shutdown Telegram bot"""
     try:
-        logger.info("Starting main application loop")
+        if app and app.bot:
+            await app.bot.shutdown()
+            logger.info("Telegram bot shut down successfully")
+    except Exception as e:
+        logger.error(f"Error during bot shutdown: {e}")
+
+async def main():
+    app = None
+    try:
+        # Create and setup application
+        app = create_app()
+        await init_bot(app)
+        
+        # Configure and start server
+        config = HyperConfig()
+        config.bind = ["127.0.0.1:5000"]
+        
+        logger.info("Starting server...")
+        await serve(app, config)
+        
+    except KeyboardInterrupt:
+        logger.info("Shutting down server...")
+    except Exception as e:
+        logger.error(f"Server error: {e}", exc_info=True)
+    finally:
+        if app:
+            await shutdown_bot(app)
+        logger.info("Server shutdown completed")
+
+if __name__ == '__main__':
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Server stopped manually")
+        logger.info("Server stopped via Ctrl+C")
     except Exception as e:
-        logger.error(f"Server encountered an error: {e}", exc_info=True)
-        raise
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
